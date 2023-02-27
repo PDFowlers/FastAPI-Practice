@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from fastapi import Body, FastAPI, Response, status, HTTPException, Depends
 from pydantic import BaseModel
 from random import randrange
@@ -6,17 +6,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import time
 from sqlalchemy.orm import Session
-from . import models
+from . import models, schemas
 from .database import engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-
-class Post(BaseModel):
-    title: str
-    content: str
-    published: bool = True
 
 while True:
     try:
@@ -29,65 +24,46 @@ while True:
         print("Error: ")
         time.sleep(2)
 
-
-my_posts = [{'title':'title of post 1', 'content':'content of post 1', 'id':1}, {'title':'favorite foods', 'content':'I like pizza', 'id':2}]
-
-def find_post(id):
-    for post in my_posts:
-        if post['id'] == id:
-            return post
-
-def find_post_index(id):
-    for idx, post in enumerate(my_posts):
-        if post['id'] == id:
-            return idx
-
 # "/" refers to the root directory. You can change the desired url by writting more of a "url" after "/"
 @app.get("/")
 def root():
     return {"message": "Welcome to my API"}
 
-@app.get('/sqlalchemy')
-def test_posts(db: Session = Depends(get_db)):
-    return {'status':'Success'}
+@app.get('/posts', response_model=List[schemas.Post])
+def get_posts(db: Session = Depends(get_db)):
+    posts = db.query(models.Post).all() # .query is essentially using the "SELECT" SQL command
+    return posts
 
-@app.get('/posts')
-def get_posts():
-    cursor.execute('''SELECT * FROM posts ''')
-    posts = cursor.fetchall()
-    return {'data':posts}
-
-@app.get('/posts/{id}')
-def get_post(id: int, response: Response):
-    cursor.execute('''SELECT * FROM posts WHERE id = %s ''', (id,))
-    post = cursor.fetchone()
+@app.get('/posts/{id}', response_model=schemas.Post)
+def get_post(id: int, response: Response, db: Session = Depends(get_db)):
+    post = db.query(models.Post).filter(models.Post.id == id).first() # '.filter' command functions similar to WHERE in sql '.first' will return the first instance of the desired filter
     if not post:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} was not found')
-    return {'post_detail': post}
+    return post
 
-# title str, content str, published bool, rating int
-@app.post('/posts', status_code=status.HTTP_201_CREATED)
-def create_post(post: Post):
-    cursor.execute('''INSERT INTO posts (title, content, published) VALUES (%s, %s, %s) RETURNING *''', (post.title, post.content, post.published))
-    new_post = cursor.fetchone()
-    conn.commit()
-
-    return {'data': new_post}
+@app.post('/posts', status_code=status.HTTP_201_CREATED, response_model=schemas.Post)
+def create_post(post: schemas.PostCreate, db: Session = Depends(get_db)):
+    new_post = models.Post(**post.dict()) # '**' will unpack the dictionary for me so that you dont need to actually type out each field of the model(table) individually
+    db.add(new_post)
+    db.commit() #add + commit function to actually insert the new post into the table
+    db.refresh(new_post) #This is similar to the 'RETURNING' function in SQL language
+    return new_post
 
 @app.delete('/posts/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def delete_post(id: int):
-    cursor.execute('''DELETE FROM posts WHERE id = %s RETURNING *''', (id,))
-    deleted_post = cursor.fetchone()
-    conn.commit()
-    if not deleted_post:
+def delete_post(id: int, db: Session = Depends(get_db)):
+    deleted_post = db.query(models.Post).filter(models.Post.id == id)
+    if not deleted_post.first():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} does not exist')
+    deleted_post.delete(synchronize_session=False)
+    db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @app.put('/posts/{id}')
-def update_post(id: int, post: Post):
-    cursor.execute('''UPDATE posts SET title = %s, content = %s, published = %s WHERE id = %s RETURNING *''', (post.title, post.content, post.published, id))
-    updated_post = cursor.fetchone()
-    conn.commit()
+def update_post(id: int, post: schemas.PostBase, db: Session = Depends(get_db)):
+    post_query = db.query(models.Post).filter(models.Post.id == id)
+    updated_post = post_query.first()
     if updated_post == None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'post with id: {id} does not exist')
-    return {'updated post': updated_post}
+    post_query.update(post.dict(), synchronize_session=False)
+    db.commit()
+    return post_query.first()
